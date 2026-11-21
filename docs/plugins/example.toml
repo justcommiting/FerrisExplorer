@@ -1,0 +1,29 @@
+# Example plugin. It is not installed automatically. To try it, copy it to
+# ~/.ferris_explorer/plugins/ and enable it in the Plugins window (Ctrl+K, "Plugins").
+# The commands use tools found on macOS and Linux (shasum, wc, jq).
+# The full format is in the Plugins section of the README.
+
+name = "Examples"
+version = "1.0.0"
+description = "Small examples of actions and previewers. Edit or delete freely."
+
+# Shows in the command palette under Plugins when the selection matches `when`.
+[[action]]
+id = "sha256"
+label = "SHA-256 checksum"
+command = "shasum -a 256 {}"                 # {} is each selected path, quoted by the app
+when = { extensions = [], kind = "files", min = 1 }
+
+[[action]]
+id = "lines"
+label = "Count lines"
+command = "wc -l {+}"                        # {+} is all selected paths, in one run
+when = { extensions = ["txt", "md", "log"], kind = "files", min = 1, max = 20 }
+confirm = true                               # show the exact command lines before running
+
+# Shows the command's plain-text output in the Details panel for matching files.
+[[previewer]]
+extensions = ["json"]
+command = "jq . {}"
+timeout_ms = 2000                            # default 3000, at most 10000
+max_output = 65536                           # bytes, default 262144, at most 2097152

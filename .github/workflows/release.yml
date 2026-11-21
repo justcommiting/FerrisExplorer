@@ -1,0 +1,238 @@
+name: Release
+
+# Push a tag like v0.2.0 (matching "version" in src-tauri/tauri.conf.json), or
+# run this workflow by hand, to build installers for every platform and attach
+# them to a draft GitHub Release in this repo. The mirror job also creates a
+# matching draft in justcommiting/FerrisExplorer-releases (the public downloads
+# repo). Review both drafts, then publish both.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    name: Verify version consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check version numbers agree
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          conf=$(jq -r '.version' src-tauri/tauri.conf.json)
+          pkg=$(jq -r '.version' package.json)
+          cargo=$(grep -m1 '^version' src-tauri/Cargo.toml | cut -d'"' -f2)
+          echo "tauri.conf.json: $conf | package.json: $pkg | Cargo.toml: $cargo"
+          if [ "$conf" != "$pkg" ] || [ "$conf" != "$cargo" ]; then
+            echo "::error::Version mismatch: tauri.conf.json=$conf, package.json=$pkg, Cargo.toml=$cargo. Make them equal before releasing."
+            exit 1
+          fi
+          if [ "$REF_TYPE" = "tag" ] && [ "$REF_NAME" != "v$conf" ]; then
+            echo "::error::Tag $REF_NAME does not match version v$conf. Delete the tag and re-tag with v$conf, or fix the version."
+            exit 1
+          fi
+
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    name: Build (${{ matrix.name }})
+    needs: [verify, ci]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            os: windows-latest
+            args: ''
+          - name: macOS Apple Silicon
+            os: macos-latest
+            args: --target aarch64-apple-darwin
+          - name: macOS Intel
+            os: macos-latest
+            args: --target x86_64-apple-darwin
+          - name: Linux x64
+            os: ubuntu-22.04
+            args: ''
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux system libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev libssl-dev \
+            libayatana-appindicator3-dev librsvg2-dev build-essential file patchelf
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          # Both Mac targets are installed so either matrix entry can cross-build.
+          targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          key: ${{ matrix.args }}
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build and upload installers
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: v__VERSION__
+          releaseName: FerrisExplorer v__VERSION__
+          releaseBody: |
+            Installers for Windows (.msi / setup .exe), macOS (.dmg) and Linux (.deb / .AppImage / .rpm).
+
+            These builds are not code-signed yet: Windows SmartScreen and macOS Gatekeeper will warn
+            on first launch. On macOS, right-click the app and choose Open the first time.
+
+            Existing installs (v0.3.2 and later) update themselves from inside the app.
+
+            Public downloads: https://github.com/justcommiting/FerrisExplorer-releases/releases
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
+
+  checksums:
+    name: Publish SHA256SUMS
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute and upload SHA256SUMS
+        run: |
+          set -euo pipefail
+          TAG="v$(jq -r '.version' src-tauri/tauri.conf.json)"
+          rm -rf assets && mkdir assets
+          if ! gh release download "$TAG" --dir assets --pattern '*'; then
+            echo "gh release download failed; falling back to the REST API"
+            release_id=$(gh api "repos/$GH_REPO/releases" --paginate --jq ".[] | select(.tag_name == \"$TAG\") | .id" | head -n1)
+            if [ -z "$release_id" ]; then
+              echo "::error::No release found for tag $TAG"
+              exit 1
+            fi
+            gh api "repos/$GH_REPO/releases/$release_id/assets" --paginate --jq '.[] | "\(.id) \(.name)"' |
+              while read -r asset_id asset_name; do
+                gh api -H "Accept: application/octet-stream" "repos/$GH_REPO/releases/assets/$asset_id" > "assets/$asset_name"
+              done
+          fi
+          cd assets
+          rm -f SHA256SUMS.txt
+          sha256sum -- * > ../SHA256SUMS.txt
+          cat ../SHA256SUMS.txt
+          cd ..
+          gh release upload "$TAG" SHA256SUMS.txt --clobber
+
+  mirror:
+    name: Mirror to public releases repo
+    needs: checksums
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download draft assets
+        run: |
+          set -euo pipefail
+          VERSION=$(jq -r '.version' src-tauri/tauri.conf.json)
+          TAG="v$VERSION"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          rm -rf dist && mkdir dist
+          if ! gh release download "$TAG" --dir dist --pattern '*'; then
+            echo "gh release download failed; falling back to the REST API"
+            release_id=$(gh api "repos/$GH_REPO/releases" --paginate --jq ".[] | select(.tag_name == \"$TAG\") | .id" | head -n1)
+            if [ -z "$release_id" ]; then
+              echo "::error::No release found for tag $TAG"
+              exit 1
+            fi
+            gh api "repos/$GH_REPO/releases/$release_id/assets" --paginate --jq '.[] | "\(.id) \(.name)"' |
+              while read -r asset_id asset_name; do
+                gh api -H "Accept: application/octet-stream" "repos/$GH_REPO/releases/assets/$asset_id" > "dist/$asset_name"
+              done
+          fi
+          ls -la dist
+
+      - name: Point latest.json at the public repo
+        run: |
+          set -euo pipefail
+          from="https://github.com/$GH_REPO/releases/download/"
+          to="https://github.com/justcommiting/FerrisExplorer-releases/releases/download/"
+          jq --arg from "$from" --arg to "$to" \
+            'walk(if type == "string" and startswith($from) then $to + .[($from | length):] else . end)' \
+            dist/latest.json > dist/latest.json.tmp
+          mv dist/latest.json.tmp dist/latest.json
+          if jq -r '.. | strings' dist/latest.json | grep -F "$from"; then
+            echo "::error::latest.json still points at the private source repo"
+            exit 1
+          fi
+          jq -r '.. | strings | select(startswith("https://"))' dist/latest.json
+
+      - name: Recompute SHA256SUMS
+        run: |
+          set -euo pipefail
+          cd dist
+          rm -f SHA256SUMS.txt
+          sha256sum -- * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Build release notes
+        run: |
+          set -euo pipefail
+          section=$(awk -v h="## [$VERSION]" 'index($0, h) == 1 {f = 1; next} f && /^## \[/ {exit} f' CHANGELOG.md | sed '/./,$!d')
+          if [ -z "$(printf '%s' "$section" | tr -d '[:space:]')" ]; then
+            echo "::error::No non-empty CHANGELOG.md section for $VERSION"
+            exit 1
+          fi
+          {
+            printf '%s\n\n' "$section"
+            cat <<'NOTES'
+          Installers for Windows (.msi / setup .exe), macOS (.dmg) and Linux (.deb / .AppImage / .rpm).
+
+          These builds are not code-signed yet: Windows SmartScreen and macOS Gatekeeper will warn
+          on first launch. On macOS, right-click the app and choose Open the first time.
+
+          Existing installs (v0.3.2 and later) update themselves from inside the app.
+          NOTES
+          } > notes.md
+          cat notes.md
+
+      - name: Create or update the public draft release
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          PUBLIC_REPO=justcommiting/FerrisExplorer-releases
+          existing=$(gh api "repos/$PUBLIC_REPO/releases" --paginate --jq ".[] | select(.tag_name == \"$TAG\") | .id" | sed -n '1p')
+          if [ -n "$existing" ]; then
+            gh release upload "$TAG" dist/* --repo "$PUBLIC_REPO" --clobber
+          else
+            gh release create "$TAG" dist/* --repo "$PUBLIC_REPO" --target main \
+              --title "FerrisExplorer $TAG" --notes-file notes.md --draft
+          fi

@@ -1,0 +1,33 @@
+# Run with: cargo deny --all-features check
+# CI runs the same check (.github/workflows/ci.yml, "deny" job).
+
+[advisories]
+ignore = [
+    # Unmaintained, not vulnerable. Pulled in only by gtk3-macros, a build-time
+    # proc macro of the Linux GTK bindings that Tauri uses; nothing of it ships
+    # in the app. Revisit when Tauri moves off gtk-rs 0.18.
+    { id = "RUSTSEC-2024-0370", reason = "proc-macro-error: build-time only, via Tauri's Linux GTK bindings" },
+]
+
+[licenses]
+# Permissive licenses only. Every crate in the tree is covered by at least one
+# of these; crates that also offer LGPL (r-efi) are taken under MIT/Apache.
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "Unlicense",
+    "CC0-1.0",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0", # webpki-root-certs (Mozilla CA data), via the updater
+    # Weak, file-level copyleft (Servo's cssparser/selectors, option-ext):
+    # fine to link into an MIT app as long as those files are not modified.
+    "MPL-2.0",
+]
+confidence-threshold = 0.9

@@ -1,0 +1,35 @@
+# Build artifacts
+/target/
+*graphify-out
+.kilo
+# IDE and Editor configurations
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+*.swo
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Offline index files and database caches
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.json.gz
+*.tmp
+
+# Frontend / Tauri
+node_modules/
+dist/
+/src-tauri/target/
+/src-tauri/gen/schemas/
